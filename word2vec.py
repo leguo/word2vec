@@ -1,6 +1,7 @@
 
 import numpy as np
 import heapq
+import math
 from collections import Counter
 
 class VocabItem(object):
@@ -45,6 +46,11 @@ class Vocab(object):
   def indice(self, sent):
     return [self.vocab_hash.get(x, self.unk_hash) for x in sent]
 
+  def tokens(self, indice):
+    if type(indice) == list:
+      return [self.items[x].token for x in indice]
+    return self.items[indice]
+
   def encode_huffman(self):
     parent = [0] * self.vocab_size
     binary = [0] * self.vocab_size
@@ -78,18 +84,44 @@ class Vocab(object):
       self.items[i].code = code[::-1]
       it = self.items[i]
 
+class UnigramTable(object):
+  def __init__(self, vocab):
+
+    self.table_size = int(1e8)
+    self.table = np.zeros(self.table_size, dtype=np.uint32)
+    power = 0.75
+
+    norm = sum([math.pow(x.count, power) for x in vocab.items])
+    vocab_size = len(vocab.items)
+
+    token_idx = 0
+    cumu_prob = pow(vocab.items[token_idx].count, power) / norm
+    
+    for i in range(self.table_size):
+      self.table[i] = token_idx
+      if 1.0 * i / self.table_size > cumu_prob:
+        token_idx += 1
+        cumu_prob += math.pow(vocab.items[token_idx].count, power) / norm
+      if token_idx >= vocab_size:
+        token_idx = vocab_size - 1
+
+  def sample(self, count):
+    indices = np.random.randint(low=0, high=self.table_size, size=count)
+    return [self.table[x] for x in indices]
+
 def sigmoid(x):
   return 1.0 / (1.0 + np.exp(-x))
 
 class Word2Vec(object):
   def __init__(self):
-    self.train_file = "test"
+    self.train_file = "text8"
     
     self.vocab = Vocab(self.train_file, 5)
     self.vocab.encode_huffman()
     
     self.D = 100
-    self.alpha = 0.025
+    self.starting_alpha = 0.025
+    self.alpha = self.starting_alpha
     self.window = 5
 
     V = self.vocab.vocab_size
@@ -122,19 +154,30 @@ class Word2Vec(object):
 
   def train(self):
     loss_history = np.zeros(1000)
+    count = 0
     with open(self.train_file, "r") as f:
       for line in f:
         sent = self.vocab.indice(line.split())
         sent_len = len(sent)
         for pos, token in enumerate(sent):
+          count += 1
+          if count % 10000 == 0:
+            self.alpha = max(self.starting_alpha * (1 - float(count) / self.vocab.word_count),
+                             self.starting_alpha * 0.0001)
+            print "\rAlpha: %f Progress: %d of %d (%.2f%%) Loss:%f" % (
+              self.alpha,
+              count,
+              self.vocab.word_count,
+              100.0 * count / self.vocab.word_count,
+              np.mean(loss_history)
+            )
+
           current_window = np.random.randint(1, self.window+1)
           left = max(pos - current_window, 0)
           right = min(pos + current_window + 1, sent_len)
           context = sent[left:pos] + sent[pos+1:right]
           loss = self._step(token, context)
-          loss_history[pos % 1000] = loss
-          if pos % 10000 == 0:
-            print "%.2f%%" % (100.0 * pos / self.vocab.word_count), pos, np.mean(loss_history)
+          loss_history[count % 1000] = loss
 
   def save(self, fo):
     with open(fo, 'w') as fo:
