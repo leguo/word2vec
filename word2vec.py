@@ -113,12 +113,20 @@ def sigmoid(x):
   return 1.0 / (1.0 + np.exp(-x))
 
 class Word2Vec(object):
-  def __init__(self):
-    self.train_file = "text8"
+  def __init__(self, train_file="text8", cbow=True, hs=True):
+    self.train_file = train_file
+    self.cbow = cbow
+    self.hs = hs
+    self.negative = 5
     
+    print "Initializing vocab ..."
     self.vocab = Vocab(self.train_file, 5)
     self.vocab.encode_huffman()
     
+    if not hs:
+      print "Initializing unigram table ..."
+      self.table = UnigramTable(self.vocab)
+
     self.D = 100
     self.starting_alpha = 0.025
     self.alpha = self.starting_alpha
@@ -129,26 +137,72 @@ class Word2Vec(object):
     self.syn1 = np.zeros((V, self.D))
 
   def _step(self, token, context):
-    neu1 = np.mean([self.syn0[x] for x in context], axis=0) # (self.D,)
-    dneu1 = np.zeros(self.D)
     loss = 0
     
-    for j, label in zip(self.vocab.items[token].path, self.vocab.items[token].code):
-      # forward
-      z = np.sum(neu1 * self.syn1[j])
-      p = sigmoid(z)
-      loss_j = - ((1 - label) * np.log(p) + label * np.log(1-p))
-      loss += loss_j
-    
-      # back prop
-      dz = p + label - 1
-      dneu1 += dz * self.syn1[j]
-      dsyn1_j = dz * neu1
-      self.syn1[j] -= self.alpha * dsyn1_j
-    
-    for i in context:
-      dsyn0_i = dneu1
-      self.syn0[i] -= self.alpha * dsyn0_i
+    if self.cbow:
+      neu1 = np.mean([self.syn0[x] for x in context], axis=0) # (self.D,)
+      dneu1 = np.zeros(self.D)
+      if self.hs:
+        for j, label in zip(self.vocab.items[token].path, self.vocab.items[token].code):
+          # forward
+          z = np.sum(neu1 * self.syn1[j])
+          p = sigmoid(z)
+          #loss_j = - ((1 - label) * np.log(p) + label * np.log(1-p))
+          #loss += loss_j
+          # back prop
+          dz = p + label - 1
+          dneu1 += dz * self.syn1[j]
+          dsyn1_j = dz * neu1
+          self.syn1[j] -= self.alpha * dsyn1_j
+        
+      else:
+        neg = self.table.sample(self.negative)
+        for j, label in [(token, 1)] + [(x, 0) for x in neg if x != token]:
+          # forward
+          z = np.sum(neu1 * self.syn1[j])
+          p = sigmoid(z)
+          # loss_j = - (label*np.log(p) + (1-label)*np.log(1-p))
+          # back prop
+          dz = p - label
+          dneu1 += dz * self.syn1[j]
+          dsyn1_j = dz * neu1
+          self.syn1[j] -= self.alpha * dsyn1_j
+
+      for i in context:
+        dsyn0_i = dneu1
+        self.syn0[i] -= self.alpha * dsyn0_i
+
+    # skip-gram
+    else:
+      for c in context:
+        neu1 = self.syn0[c] # (self.D,)
+        dneu1 = np.zeros(self.D)
+
+        # hierarchical softmax
+        if self.hs:
+          for j, label in zip(self.vocab.items[token].path, self.vocab.items[token].code):
+            z = np.sum(neu1 * self.syn1[j])
+            p = sigmoid(z)
+            dz = p + label - 1
+            dneu1 += dz * self.syn1[j]
+            self.syn1[j] -= self.alpha * (dz * neu1)
+
+        # negative sampling
+        else:
+          neg = self.table.sample(self.negative)
+          for j, label in [(token, 1)] + [(x, 0) for x in neg if x != token]:
+            # propagate hidden -> output
+            z = np.sum(neu1 * self.syn1[j])
+            p = sigmoid(z)
+            # loss_j = - (label*np.log(p) + (1-label)*np.log(1-p))
+            # back prop
+            dz = p - label
+            dneu1 += dz * self.syn1[j]
+            # learn weights hidden -> output
+            self.syn1[j] -= self.alpha * (dz * neu1)
+
+        # learn weights input -> hidden
+        self.syn0[c] -= self.alpha * dneu1
   
     return loss
 
@@ -188,6 +242,6 @@ class Word2Vec(object):
         fo.write('%s %s\n' % (token, vector_str))
 
 if '__main__' == __name__:
-  model = Word2Vec()
+  model = Word2Vec(train_file="text8", cbow=False, hs=False)
   model.train()
-  model.save("w2v.out")
+  model.save("skipgram-ns.vector")
